@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>theSoftSongs — Viewer</title>
+  <link rel="stylesheet" href="DashboardV1.css">
+</head>
+<body class="viewer">
+
+<canvas id="viewer-canvas"></canvas>
+
+<header class="site-header">
+  <span class="site-name">theSoftSongs<br>asa</span>
+  <a class="back-btn" href="index.html">&#8592; Back</a>
+</header>
+
+<div class="track-overlay" id="track-overlay">
+  <img class="track-overlay-art" id="overlay-art" src="" alt="Album art">
+  <div class="track-overlay-info" id="overlay-info"></div>
+</div>
+
+<script>
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+  function rndRange(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+  function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const k = n => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    return '#' + [f(0), f(8), f(4)].map(v => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+  }
+
+  function randomColors() {
+    const count = 3 + Math.floor(Math.random() * 3); // 3–5 colors
+    const hues  = [];
+    for (let i = 0; i < count; i++) {
+      // Spread hues evenly with some jitter
+      hues.push((i / count) * 360 + rndRange(-20, 20));
+    }
+    return hues.map(h => hslToHex(
+      ((h % 360) + 360) % 360,
+      55 + rndRange(0, 45),   // saturation 55–100%
+      40 + rndRange(0, 30)    // lightness 40–70%
+    ));
+  }
+
+  // ── Adaptive UI color ────────────────────────────────────────────────────────
+  function computeUIColor(colors) {
+    function colorDist(hex, r2, g2, b2) {
+      if (hex.length < 7) return 999;
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return Math.sqrt((r - r2) ** 2 + (g - g2) ** 2 + (b - b2) ** 2);
+    }
+    const tooClose = (r, g, b) => colors.some(hex => colorDist(hex, r, g, b) < 60);
+
+    // Try blue first, then white — both contrast well on the dark (#0d0d0d) background.
+    // Only use the brightness-based fallback if both are too close to palette colors.
+    if (!tooClose(0x6B, 0x8A, 0xFF)) return '#6B8AFF';
+    if (!tooClose(0xFF, 0xFF, 0xFF)) return '#ffffff';
+    const avgL = colors.reduce((sum, hex) => {
+      if (hex.length < 7) return sum;
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return sum + (0.299 * r + 0.587 * g + 0.114 * b);
+    }, 0) / colors.length;
+    return avgL > 128 ? '#000000' : '#ffffff';
+  }
+
+  // ── Load state ──────────────────────────────────────────────────────────────
+  const raw   = localStorage.getItem('dashboardState');
+  const state = raw ? JSON.parse(raw) : {};
+
+  const colors      = state.colors?.length ? state.colors : ['#6B8AFF', '#184AFF', '#FFFFFF'];
+  const spread      = (state.spread  ?? 50) / 100;
+  const opacity     = (state.opacity ?? 65) / 100;
+  const noiseLevel  = (state.noise   ?? 0)  / 100;
+  const composition = state.composition ?? 'full-bleed';
+
+  // ── Audio features (real or random) ─────────────────────────────────────────
+  const _af        = state.audioFeatures ?? {};
+  const tempo       = _af.tempo        ?? (60  + Math.random() * 120);
+  const energy      = _af.energy       ?? (0.2 + Math.random() * 0.7);
+  const danceability = _af.danceability ?? (0.2 + Math.random() * 0.7);
+  const beatFreq    = (2 * Math.PI * tempo) / 60; // angular freq for beat-sync pulses
+
+  // ── Web Audio (Spotify 30s preview) ─────────────────────────────────────────
+  let analyser     = null;
+  let analyserData = null;
+
+  // Smoothed levels — persisted between frames for EMA
+  let smoothed = { bass: energy, mid: energy, treble: energy * 0.5 };
+
+  async function initAudio(url) {
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const res      = await fetch(url);
+      const buf      = await res.arrayBuffer();
+      const decoded  = await audioCtx.decodeAudioData(buf);
+
+      analyser          = audioCtx.createAnalyser();
+      analyser.fftSize  = 256;
+      analyserData      = new Uint8Array(analyser.frequencyBinCount);
+
+      const source  = audioCtx.createBufferSource();
+      source.buffer = decoded;
+      source.loop   = true;
+      source.connect(analyser);
+      analyser.connect(audioCtx.destination);
+      source.start(0);
+    } catch (e) {
+      console.warn('Audio preview unavailable:', e);
+    }
+  }
+
+  // Exponential moving average — smooths raw FFT data so changes feel gradual
+  // attack: how fast levels rise  (higher = snappier)
+  // release: how fast levels fall (lower = longer tail)
+  function getAudioLevels() {
+    if (!analyser) return smoothed;
+    analyser.getByteFrequencyData(analyserData);
+    const bins = analyserData.length;
+    let bS = 0, bN = 0, mS = 0, mN = 0, tS = 0, tN = 0;
+    for (let i = 0; i < bins; i++) {
+      const freq = i * (22050 / bins);
+      if      (freq <  250) { bS += analyserData[i]; bN++; }
+      else if (freq < 2000) { mS += analyserData[i]; mN++; }
+      else                  { tS += analyserData[i]; tN++; }
+    }
+    const raw = {
+      bass:   bN ? bS / bN / 255 : 0,
+      mid:    mN ? mS / mN / 255 : 0,
+      treble: tN ? tS / tN / 255 : 0,
+    };
+    // Asymmetric smoothing: attack faster than release for organic feel
+    const attack  = 0.07;
+    const release = 0.04;
+    for (const k of ['bass', 'mid', 'treble']) {
+      const a = raw[k] > smoothed[k] ? attack : release;
+      smoothed[k] = smoothed[k] * (1 - a) + raw[k] * a;
+    }
+    return smoothed;
+  }
+
+  if (state.previewUrl) initAudio(state.previewUrl);
+
+  // Apply adaptive UI color as CSS custom property
+  const uiColor = computeUIColor(colors);
+  const uiHoverColor = uiColor === '#ffffff' ? '#0d0d0d' : uiColor === '#000000' ? '#ffffff' : '#0d0d0d';
+  document.documentElement.style.setProperty('--ui-color', uiColor);
+  document.documentElement.style.setProperty('--ui-hover-color', uiHoverColor);
+
+  const track = state.track ?? {};
+
+  // ── Populate track overlay ──────────────────────────────────────────────────
+  const overlayInfo = document.getElementById('overlay-info');
+  const overlayArt  = document.getElementById('overlay-art');
+
+  if (track.title) {
+    const titleEl = document.createElement('span');
+    titleEl.className   = 'track-overlay-title';
+    titleEl.textContent = track.title;
+    overlayInfo.appendChild(titleEl);
+  }
+
+  if (track.artist) {
+    const artistEl = document.createElement('a');
+    artistEl.className   = 'track-overlay-artist';
+    artistEl.textContent = track.artist;
+    artistEl.href        = track.artistUrl || '#';
+    artistEl.target      = '_blank';
+    artistEl.rel         = 'noopener';
+    overlayInfo.appendChild(artistEl);
+  }
+
+  if (track.albumArt) {
+    overlayArt.src = track.albumArt;
+    overlayArt.classList.add('visible');
+  }
+
+  // ── Canvas ──────────────────────────────────────────────────────────────────
+  const canvas = document.getElementById('viewer-canvas');
+  const ctx    = canvas.getContext('2d');
+  let w, h, blobs, noiseCanvas, shapes, shapeAlphaHex;
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function toHex2(v)     { return Math.round(v).toString(16).padStart(2, '0'); }
+
+  // ── Simplex noise ────────────────────────────────────────────────────────────
+  // Compact 2D simplex — builds permutation table once, each call is ~15 ops.
+  // Returns values in [-1, 1].
+  const sn = (() => {
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    for (let i = 255; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [p[i], p[j]] = [p[j], p[i]]; }
+    const perm = new Uint8Array(512);
+    for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+    const G2 = (3 - Math.sqrt(3)) / 6, F2 = 0.5 * (Math.sqrt(3) - 1);
+    const gr = [[1,1],[-1,1],[1,-1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]];
+    return (xin, yin) => {
+      const s  = (xin + yin) * F2;
+      const i  = Math.floor(xin + s), j = Math.floor(yin + s);
+      const t  = (i + j) * G2;
+      const x0 = xin - (i - t), y0 = yin - (j - t);
+      const i1 = x0 > y0 ? 1 : 0, j1 = x0 > y0 ? 0 : 1;
+      const x1 = x0 - i1 + G2,   y1 = y0 - j1 + G2;
+      const x2 = x0 - 1 + 2*G2,  y2 = y0 - 1 + 2*G2;
+      const ii = i & 255, jj = j & 255;
+      const g0 = gr[perm[ii +      perm[jj     ]] % 8];
+      const g1 = gr[perm[ii + i1 + perm[jj + j1]] % 8];
+      const g2 = gr[perm[ii + 1 +  perm[jj + 1 ]] % 8];
+      let n = 0;
+      let t0 = 0.5 - x0*x0 - y0*y0; if (t0 > 0) { t0 *= t0; n += t0*t0*(g0[0]*x0+g0[1]*y0); }
+      let t1 = 0.5 - x1*x1 - y1*y1; if (t1 > 0) { t1 *= t1; n += t1*t1*(g1[0]*x1+g1[1]*y1); }
+      let t2 = 0.5 - x2*x2 - y2*y2; if (t2 > 0) { t2 *= t2; n += t2*t2*(g2[0]*x2+g2[1]*y2); }
+      return 70 * n;
+    };
+  })();
+
+  // ── Build blob descriptors ──────────────────────────────────────────────────
+  function buildBlobs() {
+    const n   = colors.length;
+    const cx  = w * 0.5;
+    const cy  = h * 0.5;
+    const out = [];
+
+    function rnd(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+    const tempoScale = tempo / 120; // 1.0 at 120 BPM
+
+    if (composition === 'full-bleed') {
+      const cols = 4, rows = 4;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          out.push({
+            color:      colors[(r * cols + c) % n],
+            homeX:      ((c + 0.5) / cols) * w,
+            homeY:      ((r + 0.5) / rows) * h,
+            baseRadius: Math.min(w, h) * lerp(0.65, 0.38, spread),
+            freqX:      rnd(0.08, 0.14) * tempoScale,
+            freqY:      rnd(0.06, 0.12) * tempoScale,
+            seedX:      rnd(0,    500),
+            seedY:      rnd(1000, 1500),
+            pulseFreq:  beatFreq,
+            pulsePH:    rnd(0, Math.PI * 2),
+          });
+        }
+      }
+    }
+
+    if (composition === 'grid') {
+      const cellSize = w * 0.12;
+      const padding  = cellSize * 0.75;
+      const usableW  = w - padding * 2;
+      const usableH  = h - padding * 2;
+      const cols     = Math.max(1, Math.round(usableW / cellSize));
+      const rows     = Math.max(1, Math.round(usableH / cellSize));
+      const total    = cols * rows;
+      const pool     = Array.from({ length: total }, (_, i) => colors[i % n]);
+      for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+      }
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          out.push({
+            color:      pool[r * cols + c],
+            homeX:      padding + (cols > 1 ? (c / (cols - 1)) * usableW : usableW / 2),
+            homeY:      padding + (rows > 1 ? (r / (rows - 1)) * usableH : usableH / 2),
+            baseRadius: cellSize * lerp(0.55, 0.18, spread),
+            freqX:      rnd(0.05, 0.10) * tempoScale,
+            freqY:      rnd(0.04, 0.09) * tempoScale,
+            seedX:      rnd(0,    500),
+            seedY:      rnd(1000, 1500),
+            pulseFreq:  beatFreq,
+            pulsePH:    rnd(0, Math.PI * 2),
+          });
+        }
+      }
+    }
+
+    if (composition === 'radial') {
+      colors.forEach((color, i) => {
+        if (i === 0) {
+          out.push({
+            color,
+            homeX:      cx,       homeY:     cy,
+            baseRadius: Math.min(w, h) * lerp(0.65, 0.4, spread),
+            freqX:      0,        freqY:     0,
+            seedX:      0,        seedY:     0,
+            pulseFreq:  beatFreq, pulsePH:   0,
+          });
+        } else {
+          const angle = ((i - 1) / Math.max(n - 1, 1)) * Math.PI * 2;
+          out.push({
+            color,
+            homeX:       cx,
+            homeY:       cy,
+            baseRadius:  Math.min(w, h) * lerp(0.6, 0.32, spread),
+            isOrbit:     true,
+            baseAngle:   angle,
+            orbitRadius: Math.min(w, h) * lerp(0.02, 0.4, spread) * lerp(0.5, 1.3, energy),
+            orbitSpeed:  tempoScale * (0.15 + (i % 3) * 0.07),
+            seedOrbit:   rnd(2000, 2500),
+            pulseFreq:   beatFreq,
+            pulsePH:     rnd(0, Math.PI * 2),
+            freqX: 0, freqY: 0, seedX: 0, seedY: 0,
+          });
+        }
+      });
+    }
+
+    return out;
+  }
+
+  // ── Pre-generate static noise texture ──────────────────────────────────────
+  function buildNoiseCanvas() {
+    noiseCanvas        = document.createElement('canvas');
+    noiseCanvas.width  = canvas.width;
+    noiseCanvas.height = canvas.height;
+    const nctx = noiseCanvas.getContext('2d');
+    const img  = nctx.createImageData(canvas.width, canvas.height);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      img.data[i]     = v;
+      img.data[i + 1] = v;
+      img.data[i + 2] = v;
+      img.data[i + 3] = 255;
+    }
+    nctx.putImageData(img, 0, 0);
+  }
+
+  // ── Build shape descriptors ──────────────────────────────────────────────────
+  function buildShapes() {
+    const count      = 300 + Math.floor(Math.random() * 151);
+    const minDim     = Math.min(w, h);
+    const minSize    = minDim * lerp(0.008, 0.015, spread);
+    const maxSize    = minDim * lerp(0.04,  0.10,  spread);
+    const tempoScale = tempo / 120;
+    const driftBase  = lerp(15, 70, energy);
+
+    shapeAlphaHex = toHex2(lerp(0x18, 0xBB, opacity));
+    shapes = [];
+
+    for (let i = 0; i < count; i++) {
+      const size = minSize + Math.random() * (maxSize - minSize);
+      shapes.push({
+        ci:        Math.floor(Math.random() * colors.length),
+        homeX:     Math.random() * w,
+        homeY:     Math.random() * h,
+        size,
+        sides:     3 + Math.floor(Math.random() * 28),
+        rotation0: Math.random() * Math.PI * 2,
+        rotSpeed:  (Math.random() < 0.5 ? 1 : -1) * (0.1 + Math.random() * 0.4) * tempoScale,
+        freqX:     (0.04 + Math.random() * 0.07) * tempoScale,
+        freqY:     (0.03 + Math.random() * 0.06) * tempoScale,
+        seedX:     Math.random() * 500,
+        seedY:     1000 + Math.random() * 500,
+        driftAmp:  driftBase * (0.5 + Math.random()),
+      });
+    }
+  }
+
+  // ── Setup / resize ──────────────────────────────────────────────────────────
+  function setup() {
+    const dpr     = window.devicePixelRatio || 1;
+    canvas.width  = window.innerWidth  * dpr;
+    canvas.height = window.innerHeight * dpr;
+    ctx.scale(dpr, dpr);
+    w     = window.innerWidth;
+    h     = window.innerHeight;
+    if (composition === 'shapes') {
+      buildShapes();
+    } else {
+      blobs = buildBlobs();
+    }
+    if (noiseLevel > 0) buildNoiseCanvas();
+  }
+
+  // ── Animation loop ──────────────────────────────────────────────────────────
+  function drawFrame(timestamp) {
+    ctx.clearRect(0, 0, w, h);
+
+    const t = timestamp / 1000;
+
+    const audio = getAudioLevels();
+
+    if (composition === 'shapes') {
+      // Bass pushes shapes further from home; mid gives a gentler secondary sway
+      const driftScale = 0.7 + audio.bass * 0.8 + audio.mid * 0.3;
+      const groups = colors.map(() => new Path2D());
+      shapes.forEach(({ ci, homeX, homeY, size, sides, rotation0, rotSpeed, freqX, freqY, seedX, seedY, driftAmp }) => {
+        const x   = homeX + sn(seedX, t * freqX) * driftAmp * driftScale;
+        const y   = homeY + sn(seedY, t * freqY) * driftAmp * driftScale;
+        const rot = rotation0 + t * rotSpeed;
+        const p   = groups[ci];
+        for (let s = 0; s <= sides; s++) {
+          const a = (s / sides) * Math.PI * 2 + rot;
+          s === 0 ? p.moveTo(x + Math.cos(a) * size, y + Math.sin(a) * size)
+                  : p.lineTo(x + Math.cos(a) * size, y + Math.sin(a) * size);
+        }
+        p.closePath();
+      });
+      ctx.globalCompositeOperation = 'source-over';
+      groups.forEach((path, i) => {
+        ctx.fillStyle = colors[i] + shapeAlphaHex;
+        ctx.fill(path);
+      });
+    } else {
+      // Bass drives drift distance; mid gives a subtle secondary swell to radius
+      const driftAmp = Math.min(w, h) * lerp(0.02, 0.14, spread) * (0.6 + audio.bass * 0.8 + audio.mid * 0.3);
+      const pulseAmp = 0.03 + audio.mid * 0.10;
+
+      ctx.globalCompositeOperation = 'screen';
+
+      const innerHex = toHex2(lerp(0x08, 0x99, opacity));
+      const midHex   = toHex2(lerp(0x04, 0x44, opacity));
+
+      blobs.forEach(blob => {
+        let x, y;
+
+        if (blob.isOrbit) {
+          // Orbit angle stays circular; radius gets a slow noise wobble
+          const angle  = blob.baseAngle + t * blob.orbitSpeed;
+          const wobble = 1 + sn(blob.seedOrbit, t * 0.08) * 0.18;
+          x = blob.homeX + Math.cos(angle) * blob.orbitRadius * wobble;
+          y = blob.homeY + Math.sin(angle) * blob.orbitRadius * wobble;
+        } else {
+          x = blob.homeX + sn(blob.seedX, t * blob.freqX) * driftAmp;
+          y = blob.homeY + sn(blob.seedY, t * blob.freqY) * driftAmp;
+        }
+
+        const r = blob.baseRadius * (1 + sn(blob.seedX + 9999, t * blob.pulseFreq) * pulseAmp);
+
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0,   blob.color + innerHex);
+        g.addColorStop(0.5, blob.color + midHex);
+        g.addColorStop(1,   blob.color + '00');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+      });
+
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    // Overlay pre-generated noise texture
+    if (noiseLevel > 0 && noiseCanvas) {
+      ctx.globalAlpha              = noiseLevel * 0.2;
+      ctx.globalCompositeOperation = 'overlay';
+      ctx.drawImage(noiseCanvas, 0, 0, w, h);
+      ctx.globalAlpha              = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    requestAnimationFrame(drawFrame);
+  }
+
+  window.addEventListener('resize', setup);
+  setup();
+  requestAnimationFrame(drawFrame);
+</script>
+
+</body>
+</html>

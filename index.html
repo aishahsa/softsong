@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>theSoftSongs</title>
+  <link rel="stylesheet" href="DashboardV1.css">
+</head>
+<body>
+
+<header class="site-header">
+  <span class="site-name">theSoftSongs<br>asa</span>
+</header>
+
+<div class="dashboard">
+
+  <!-- Left Controls -->
+  <div class="controls-panel">
+
+    <!-- Link Input -->
+    <div>
+      <h2 class="section-label">UPLOAD LINK</h2>
+      <div class="link-row">
+        <div class="link-field">
+          <input class="link-input" type="url" placeholder="Paste Spotify link here" id="song-link">
+          <p class="link-hint" id="link-status">Spotify URL</p>
+          <div class="track-meta visible" id="track-meta">
+            <span class="track-title" id="track-title">the blue got here before the song did</span>
+            <a class="track-artist" id="track-artist" href="#" target="_blank" rel="noopener" style="display:none"></a>
+          </div>
+        </div>
+        <img id="album-art" class="album-art visible" src="placeholder.png" alt="Album art">
+      </div>
+    </div>
+
+    <!-- Color Palette -->
+    <div>
+      <h2 class="section-label">COLOR PALETTE</h2>
+      <div class="color-palette">
+        <div class="color-box" style="background: #6B8AFF;">
+          <input type="color" value="#6B8AFF" onchange="this.parentElement.classList.remove('empty'); this.parentElement.style.background = this.value; updateGradient()">
+        </div>
+        <div class="color-box" style="background: #FFFFFF;">
+          <input type="color" value="#FFFFFF" onchange="this.parentElement.classList.remove('empty'); this.parentElement.style.background = this.value; updateGradient()">
+        </div>
+        <div class="color-box" style="background: #1A1A1A;">
+          <input type="color" value="#1A1A1A" onchange="this.parentElement.classList.remove('empty'); this.parentElement.style.background = this.value; updateGradient()">
+        </div>
+        <div class="color-box" style="background: #184AFF;">
+          <input type="color" value="#184AFF" onchange="this.parentElement.classList.remove('empty'); this.parentElement.style.background = this.value; updateGradient()">
+        </div>
+        <div class="color-box" style="background: #000000;">
+          <input type="color" value="#000000" onchange="this.parentElement.classList.remove('empty'); this.parentElement.style.background = this.value; updateGradient()">
+        </div>
+      </div>
+      <p class="palette-note">Up to 5 colors</p>
+    </div>
+
+    <!-- Spread -->
+    <div>
+      <div class="slider-header">
+        <h2 class="section-label">SPREAD</h2>
+        <span class="slider-value" id="spread-val">50</span>
+      </div>
+      <input type="range" min="0" max="100" value="50" id="spread">
+      <div class="slider-footer">
+        <span class="slider-hint">Tight</span>
+        <span class="slider-hint">Loose</span>
+      </div>
+    </div>
+
+    <!-- Density -->
+    <div>
+      <div class="slider-header">
+        <h2 class="section-label">OPACITY</h2>
+        <span class="slider-value" id="density-val">65</span>
+      </div>
+      <input type="range" min="0" max="100" value="65" id="density">
+      <div class="slider-footer">
+        <span class="slider-hint">Transparent</span>
+        <span class="slider-hint">Opaque</span>
+      </div>
+    </div>
+
+    <!-- Noise -->
+    <div>
+      <div class="slider-header">
+        <h2 class="section-label">NOISE</h2>
+        <span class="slider-value" id="noise-val">0</span>
+      </div>
+      <input type="range" min="0" max="100" value="0" id="noise">
+      <div class="slider-footer">
+        <span class="slider-hint">Clean</span>
+        <span class="slider-hint">Static</span>
+      </div>
+    </div>
+
+    <!-- Composition -->
+    <div>
+      <h2 class="section-label">COMPOSITION</h2>
+      <div class="composition-grid">
+        <button class="comp-btn active" onclick="selectComposition(this)">Full-bleed</button>
+        <button class="comp-btn" onclick="selectComposition(this)">Shapes</button>
+        <button class="comp-btn" onclick="selectComposition(this)">Radial</button>
+      </div>
+    </div>
+
+    <!-- Generate -->
+    <button class="generate-btn">Generate</button>
+
+  </div>
+
+  <!-- Right Preview -->
+  <div class="preview-panel">
+    <canvas id="gradient-canvas"></canvas>
+  </div>
+
+</div>
+
+<script src="Script.js"></script>
+
+</body>
+</html>
