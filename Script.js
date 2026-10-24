@@ -167,31 +167,9 @@ albumArt.addEventListener('load', function() {
   }
 });
 
-// ─── Spotify Web API credentials ──────────────────────────────────────────
-// 1. Go to https://developer.spotify.com → Log in → Create an App
-// 2. Copy your Client ID and Client Secret and paste them below
-const SPOTIFY_CLIENT_ID     = '2a33867bfce240089b55df39e0b03fe7';
-const SPOTIFY_CLIENT_SECRET = '1931aaa76bee43af9620913b2ecef88e';
-
-let _spotifyToken  = null;
-let _tokenExpiry   = 0;
-
-async function getSpotifyToken() {
-  if (_spotifyToken && Date.now() < _tokenExpiry) return _spotifyToken;
-  const res = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type':  'application/x-www-form-urlencoded',
-      'Authorization': 'Basic ' + btoa(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`)
-    },
-    body: 'grant_type=client_credentials'
-  });
-  if (!res.ok) throw new Error('Token request failed');
-  const json = await res.json();
-  _spotifyToken = json.access_token;
-  _tokenExpiry  = Date.now() + (json.expires_in - 60) * 1000;
-  return _spotifyToken;
-}
+// ─── Spotify Web API (via proxy; the client secret lives on the Worker) ───
+// After deploying the Worker (see worker/README.md), paste its URL here.
+const SPOTIFY_PROXY_URL = 'https://softsong-spotify-proxy.aishahsa.workers.dev';
 
 function extractSpotifyTrackId(url) {
   const m = url.match(/spotify\.com\/track\/([a-zA-Z0-9]+)/);
@@ -201,19 +179,13 @@ function extractSpotifyTrackId(url) {
 async function fetchSpotifyTrack(spotifyUrl) {
   const trackId = extractSpotifyTrackId(spotifyUrl);
   if (!trackId) return null;
-  const token = await getSpotifyToken();
-  const res = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
-    headers: { 'Authorization': `Bearer ${token}` }
-  });
+  const res = await fetch(`${SPOTIFY_PROXY_URL}/track/${trackId}`);
   if (!res.ok) throw new Error('Track fetch failed');
   return res.json();
 }
 
 async function fetchAudioFeatures(trackId) {
-  const token = await getSpotifyToken();
-  const res = await fetch(`https://api.spotify.com/v1/audio-features/${trackId}`, {
-    headers: { 'Authorization': `Bearer ${token}` }
-  });
+  const res = await fetch(`${SPOTIFY_PROXY_URL}/audio-features/${trackId}`);
   if (!res.ok) throw new Error('Audio features fetch failed');
   return res.json();
 }
@@ -247,7 +219,7 @@ songLink.addEventListener('input', function() {
     try {
       let title = '', albumName = '', artistName = '', artistUrl = '#', thumbnailUrl = '';
 
-      if (SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET) {
+      if (!SPOTIFY_PROXY_URL.includes('YOUR-SUBDOMAIN')) {
         // ── Web API path (full metadata) ──
         const trackId = extractSpotifyTrackId(url);
         const track   = await fetchSpotifyTrack(url);
