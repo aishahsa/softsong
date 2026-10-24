@@ -21,6 +21,27 @@ function randomAudioFeatures() {
   };
 }
 
+// Deterministic stand-in for Spotify's deprecated audio-features endpoint:
+// the same track ID always yields the same tempo/energy/etc.
+function seededAudioFeatures(seed) {
+  let h = 1779033703 ^ seed.length;
+  for (let i = 0; i < seed.length; i++) {
+    h = Math.imul(h ^ seed.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  const rand = () => {
+    h = Math.imul(h ^ (h >>> 16), 2246822507);
+    h = Math.imul(h ^ (h >>> 13), 3266489909);
+    return ((h ^= h >>> 16) >>> 0) / 4294967296;
+  };
+  return {
+    tempo:        60  + rand() * 120,
+    energy:       0.2 + rand() * 0.7,
+    danceability: 0.2 + rand() * 0.7,
+    valence:      rand(),
+  };
+}
+
 let audioFeatures = randomAudioFeatures();
 
 function randomInitControls() {
@@ -241,7 +262,8 @@ songLink.addEventListener('input', function() {
             valence:      af.valence,
           };
         } catch (e) {
-          console.warn('Audio features unavailable:', e);
+          console.warn('Audio features unavailable, using seeded values:', e);
+          audioFeatures = seededAudioFeatures(trackId);
         }
       } else {
         // ── oEmbed fallback (no credentials set yet) ──
